@@ -1,0 +1,310 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ============================================================
+    // HELPER FUNCTIONS
+    // ============================================================
+    
+    // Check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Get the requesting user's profile data
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+    
+    // Check if user has a specific role
+    function hasRole(role) {
+      return isAuthenticated() && getUserData().role == role;
+    }
+    
+    // Check if user is an Administrator
+    function isAdmin() {
+      return hasRole('Administrator');
+    }
+    
+    // Check if user is a Teacher
+    function isTeacher() {
+      return hasRole('Teacher');
+    }
+    
+    // Check if user is a Student
+    function isStudent() {
+      return hasRole('Student');
+    }
+    
+    // Check if user is Teacher or Admin
+    function isTeacherOrAdmin() {
+      return isTeacher() || isAdmin();
+    }
+    
+    // Check if user belongs to a specific school
+    function belongsToSchool(schoolId) {
+      return isAuthenticated() && getUserData().schoolId == schoolId;
+    }
+    
+    // Check if request is trying to modify role field
+    function isChangingRole() {
+      return request.resource.data.role != resource.data.role;
+    }
+    
+    // Check if request is modifying own user document
+    function isOwnProfile(userId) {
+      return request.auth.uid == userId;
+    }
+    
+    
+    // ============================================================
+    // USERS COLLECTION — /users/{userId}
+    // ============================================================
+    match /users/{userId} {
+      // Read: All authenticated users can read user profiles
+      // (needed for school aggregation, rankings, and rules helper getUserData)
+      allow read: if isAuthenticated();
+      
+      // Create: Only during signup (handled by auth-context)
+      allow create: if isAuthenticated() 
+                    && request.auth.uid == userId
+                    && (!request.resource.data.keys().hasAll(['role']) 
+                        || request.resource.data.role == 'Student' 
+                        || request.resource.data.role == 'Teacher'
+                        || request.resource.data.role == 'Administrator');
+      
+      // Update: Users can update their own profile
+      // Role enforcement is handled in the application layer (auth-context.tsx)
+      allow update: if isOwnProfile(userId) || isAdmin();
+      
+      // Delete: Only admins can delete users
+      allow delete: if isAdmin();
+      
+      
+      // ---- Sub-collection: Quiz Attempts ----
+      match /quizAttempts/{attemptId} {
+        // Read: User can read their own attempts, Teachers can read their school's
+        allow read: if isOwnProfile(userId) 
+                    || (isTeacherOrAdmin() && belongsToSchool(get(/databases/$(database)/documents/users/$(userId)).data.schoolId));
+        
+        // Create: User can create their own attempts
+        allow create: if isOwnProfile(userId);
+        
+        // Update/Delete: Only user or admin
+        allow update, delete: if isOwnProfile(userId) || isAdmin();
+      }
+      
+      
+      // ---- Sub-collection: Homework Progress ----
+      match /homeworkProgress/{progressId} {
+        // Read: User can read their own, Teachers can read their school's
+        allow read: if isOwnProfile(userId) 
+                    || (isTeacherOrAdmin() && belongsToSchool(get(/databases/$(database)/documents/users/$(userId)).data.schoolId));
+        
+        // Create: User can create their own progress
+        allow create: if isOwnProfile(userId);
+        
+        // Update: User can update their own, Teachers can grade
+        allow update: if isOwnProfile(userId) || isTeacherOrAdmin();
+        
+        // Delete: Only admin
+        allow delete: if isAdmin();
+      }
+      
+      
+      // ---- Sub-collection: Safety Path Progress ----
+      match /safetyPathProgress/{progressId} {
+        // Read: User can read their own
+        allow read: if isOwnProfile(userId);
+        
+        // Write: User can write their own progress
+        allow write: if isOwnProfile(userId);
+      }
+      
+      
+      // ---- Sub-collection: Module Progress (Day-by-day) ----
+      match /moduleProgress/{progressId} {
+        // Read: User can read their own, Teachers/Admins from same school can read
+        allow read: if isOwnProfile(userId) 
+                    || (isTeacherOrAdmin() && belongsToSchool(get(/databases/$(database)/documents/users/$(userId)).data.schoolId));
+        
+        // Write: User can write their own progress
+        allow write: if isOwnProfile(userId);
+      }
+    }
+    
+    
+    // ============================================================
+    // SCHOOLS COLLECTION — /schools/{schoolId}
+    // ============================================================
+    match /schools/{schoolId} {
+      // Read: All authenticated users can read schools
+      // (needed for signup dropdown, rankings, etc.)
+      allow read: if isAuthenticated();
+      
+      // Create: Only admins can create schools
+      allow create: if isAdmin();
+      
+      // Update: Only admins can update school data
+      // Teachers can update stats (for drill logging)
+      allow update: if isAdmin() 
+                    || (isTeacherOrAdmin() && belongsToSchool(schoolId));
+      
+      // Delete: Only admins can delete schools
+      allow delete: if isAdmin();
+      
+      
+      // ---- Sub-collection: Drills ----
+      match /drills/{drillId} {
+        // Read: Members of the school can read drills
+        allow read: if belongsToSchool(schoolId);
+        
+        // Create: Teachers and Admins from the school can schedule drills
+        allow create: if isTeacherOrAdmin() && belongsToSchool(schoolId);
+        
+        // Update: Teachers and Admins from the school can update drills
+        allow update: if isTeacherOrAdmin() && belongsToSchool(schoolId);
+        
+        // Delete: Only admins can delete drills
+        allow delete: if isAdmin();
+      }
+      
+      
+      // ---- Sub-collection: Homework ----
+      match /homework/{homeworkId} {
+        // Read: Students from the school can read homework
+        allow read: if belongsToSchool(schoolId);
+        
+        // Create: Teachers and Admins from the school can create homework
+        allow create: if isTeacherOrAdmin() && belongsToSchool(schoolId);
+        
+        // Update: Teachers and Admins from the school can update homework
+        allow update: if isTeacherOrAdmin() && belongsToSchool(schoolId);
+        
+        // Delete: Teachers and Admins can delete homework
+        allow delete: if isTeacherOrAdmin() && belongsToSchool(schoolId);
+      }
+    }
+    
+    
+    // ============================================================
+    // ALERTS COLLECTION — /alerts/{alertId}
+    // ============================================================
+    match /alerts/{alertId} {
+      // Read: All authenticated users can read alerts
+      // (students need to see alerts relevant to their school)
+      allow read: if isAuthenticated();
+      
+      // Create: Only admins can send alerts
+      allow create: if isAdmin();
+      
+      // Update: Admins can update alerts
+      // Users can mark alerts as read (add their UID to readBy array)
+      allow update: if isAdmin() 
+                    || (isAuthenticated() 
+                        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readBy']));
+      
+      // Delete: Only admins can delete alerts
+      allow delete: if isAdmin();
+    }
+    
+    
+    // ============================================================
+    // NDMA ALERTS COLLECTION — /ndmaAlerts/{alertId}
+    // ============================================================
+    match /ndmaAlerts/{alertId} {
+      // Read: All authenticated users can read NDMA alerts
+      allow read: if isAuthenticated();
+      
+      // Write: Only system/admin can write (cached from external API)
+      allow write: if isAdmin();
+    }
+    
+    
+    // ============================================================
+    // EMERGENCY CONTACTS — /emergencyContacts/{contactId}
+    // ============================================================
+    match /emergencyContacts/{contactId} {
+      // Read: All authenticated users can read emergency contacts
+      allow read: if isAuthenticated();
+      
+      // Create: Admins and Teachers can add emergency contacts
+      allow create: if isTeacherOrAdmin();
+      
+      // Update: Admins and Teachers can update contacts
+      allow update: if isTeacherOrAdmin();
+      
+      // Delete: Only admins can delete contacts
+      allow delete: if isAdmin();
+    }
+    
+    
+    // ============================================================
+    // TRAINING VIDEOS — /trainingVideos/{videoId}
+    // ============================================================
+    match /trainingVideos/{videoId} {
+      // Read: All authenticated users can read training videos
+      allow read: if isAuthenticated();
+      
+      // Write: Only admins can manage training videos
+      allow write: if isAdmin();
+    }
+    
+    
+    // ============================================================
+    // STORYTELLING VIDEOS — /storytellingVideos/{videoId}
+    // ============================================================
+    match /storytellingVideos/{videoId} {
+      // Read: All authenticated users can read storytelling videos
+      allow read: if isAuthenticated();
+      
+      // Write: Only admins can manage storytelling videos
+      allow write: if isAdmin();
+    }
+    
+    
+    // ============================================================
+    // MODULE ASSIGNMENTS — /moduleAssignments/{assignmentId}
+    // ============================================================
+    match /moduleAssignments/{assignmentId} {
+      // Read: All authenticated users can read assignments
+      allow read: if isAuthenticated();
+      
+      // Only admins create/change/delete assignments (deadline, targets, status)
+      allow create, update, delete: if isAdmin();
+      
+      // ---- Sub-collection: School Status ----
+      match /schoolStatus/{schoolId} {
+        // Read: All authenticated users (for rankings)
+        allow read: if isAuthenticated();
+        
+        // Create/Delete: Admin only (created together with the assignment)
+        allow create, delete: if isAdmin();
+        
+        // Update:
+        //  - Admin: anything (stats, overdue marking)
+        //  - Teacher of THIS school: only the one-way release  pending -> released,
+        //    stamped with their own uid, touching nothing else. Once released, nobody
+        //    but an admin can change it, so a second teacher can't overwrite the first.
+        allow update: if isAdmin()
+          || (isTeacher()
+              && belongsToSchool(schoolId)
+              && resource.data.status == 'pending'
+              && request.resource.data.status == 'released'
+              && request.resource.data.releasedBy == request.auth.uid
+              && request.resource.data.diff(resource.data).affectedKeys()
+                   .hasOnly(['status', 'releasedBy', 'releasedByName', 'releasedAt']));
+      }
+    }
+    
+    
+    // ============================================================
+    // DEFAULT DENY — Block all other access
+    // ============================================================
+    // Any collection not explicitly defined above is denied
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
