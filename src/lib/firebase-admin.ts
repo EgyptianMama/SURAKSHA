@@ -29,6 +29,7 @@ function initializeFirebaseAdmin() {
   const projectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID
   
   if (!projectId) {
+    console.error('NEXT_PUBLIC_FIREBASE_PROJECT_ID is required in environment variables')
     throw new Error('NEXT_PUBLIC_FIREBASE_PROJECT_ID is required in environment variables')
   }
 
@@ -40,6 +41,8 @@ function initializeFirebaseAdmin() {
         process.env.FIREBASE_SERVICE_ACCOUNT_KEY
       ) as ServiceAccount
 
+      console.log('✅ Initializing Firebase Admin with service account')
+      
       return initializeApp({
         credential: cert(serviceAccount),
         projectId,
@@ -54,7 +57,7 @@ function initializeFirebaseAdmin() {
   // Works in Firebase environments (App Hosting, Cloud Functions)
   // For local dev, you can use: gcloud auth application-default login
   console.warn(
-    'Using Application Default Credentials. For production, set FIREBASE_SERVICE_ACCOUNT_KEY'
+    '⚠️ Using Application Default Credentials. For production, set FIREBASE_SERVICE_ACCOUNT_KEY'
   )
   
   return initializeApp({
@@ -62,13 +65,15 @@ function initializeFirebaseAdmin() {
   })
 }
 
-// Initialize on module load
+// Initialize on module load with error handling
 let adminApp: ReturnType<typeof initializeApp> | null = null
+let initError: Error | null = null
 
 try {
   adminApp = initializeFirebaseAdmin()
 } catch (error) {
-  console.error('Failed to initialize Firebase Admin:', error)
+  console.error('❌ Failed to initialize Firebase Admin:', error)
+  initError = error as Error
 }
 
 /**
@@ -76,6 +81,9 @@ try {
  * Used for verifying ID tokens
  */
 export function getAdminAuth() {
+  if (initError) {
+    throw initError
+  }
   if (!adminApp) {
     throw new Error('Firebase Admin is not initialized')
   }
@@ -87,6 +95,9 @@ export function getAdminAuth() {
  * Used for server-side Firestore operations
  */
 export function getAdminFirestore() {
+  if (initError) {
+    throw initError
+  }
   if (!adminApp) {
     throw new Error('Firebase Admin is not initialized')
   }
